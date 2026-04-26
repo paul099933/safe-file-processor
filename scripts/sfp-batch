@@ -1,0 +1,99 @@
+#!/bin/bash
+
+# ============================================
+# sfp-batch: 批量处理快捷通道
+# 统一热区 + 遍历处理 + 打包交付
+# 输出标准化: BATCH_OK / BATCH_PARTIAL / BATCH_FAIL
+# ============================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+INPUT="${1:-}"
+COMMAND="${2:-}"
+
+[ -z "$INPUT" ] && { echo 'BATCH_FAIL: reason="缺少输入" usage="sfp-batch <input_dir_or_pattern> <command_template>"'; exit 1; }
+[ -z "$COMMAND" ] && { echo 'BATCH_FAIL: reason="缺少命令模板" usage="sfp-batch <input_dir_or_pattern> <command_template>"'; exit 1; }
+
+# 禁止嵌套 sfp
+if [[ "$COMMAND" == *"sfp-"* ]]; then
+    echo 'BATCH_FAIL: reason="禁止嵌套 sfp 命令"'
+    exit 1
+fi
+
+# 收集文件
+FILES=()
+if [ -d "$INPUT" ]; then
+    while IFS= read -r -d '' file; do
+        FILES+=("$file")
+    done < <(find "$INPUT" -maxdepth 1 -type f -print0 2>/dev/null)
+elif [ -f "$INPUT" ]; then
+    FILES+=("$INPUT")
+else
+    for f in $INPUT; do
+        [ -f "$f" ] && FILES+=("$f")
+    done
+fi
+
+[ ${#FILES[@]} -eq 0 ] && { echo "BATCH_FAIL: reason=\"未找到输入文件\" pattern=\"$INPUT\""; exit 1; }
+
+# 创建统一热区
+HOT_ZONE="${SFP_HOT_ZONE:-$HOME/.sfp/hot}"
+BATCH_DIR="${HOT_ZONE}/batch_$(date +%Y%m%d-%H%M%S)-$$"
+mkdir -p "$BATCH_DIR/input"
+mkdir -p "$BATCH_DIR/output"
+
+SUCCESS=0
+FAILED=0
+
+for file in "${FILES[@]}"; do
+    filename=$(basename "$file")
+    safe_name=$(echo "$filename" | tr '$!" ' '_' | tr -s '_')
+    base_name="${safe_name%.*}"
+
+    # 复制到热区
+    cp "$file" "$BATCH_DIR/input/$safe_name" 2>/dev/null || { ((FAILED++)); continue; }
+    chmod 644 "$BATCH_DIR/input/$safe_name"
+
+    # 构建命令（替换占位符）
+    cmd="${COMMAND//\{\}/\"$BATCH_DIR/input/$safe_name\"}"
+    cmd="${cmd//\{.\}/\"$base_name\"}"
+    cmd="${cmd//\{..md\}/\"${base_name}.md\"}" 
+    cmd="${cmd//\{..png\}/\"${base_name}.png\"}" 
+    cmd="${cmd//\{..webp\}/\"${base_name}.webp\"}" 
+
+    # 执行
+    if bash -c "$cmd" >"$BATCH_DIR/${safe_name}.log" 2>&1; then
+        # 查找输出文件
+        output_file=$(find "$BATCH_DIR" -maxdepth 2 -type f -newer "$BATCH_DIR/input/$safe_name" ! -name "*.log" ! -path "*/input/*" -print -quit 2>/dev/null)
+        if [ -n "$output_file" ] && [ -s "$output_file" ]; then
+            if "${SCRIPT_DIR}/sfp-out" "$output_file" >/dev/null 2>&1; then
+                ((SUCCESS++))
+            else
+                ((FAILED++))
+            fi
+        else
+            ((FAILED++))
+        fi
+    else
+        ((FAILED++))
+    fi
+done
+
+# 打包剩余输出（如果有）
+OUTPUT_COUNT=$(find "$BATCH_DIR/output" -type f 2>/dev/null | wc -l || echo "0")
+if [ "$OUTPUT_COUNT" -gt 0 ]; then
+    ARCHIVE="${BATCH_DIR}/batch_output_$(date +%H%M%S).tar.gz"
+    tar czf "$ARCHIVE" -C "$BATCH_DIR/output" . >/dev/null 2>&1
+    [ -f "$ARCHIVE" ] && "${SCRIPT_DIR}/sfp-out" "$ARCHIVE" >/dev/null 2>&1
+fi
+
+# 清理
+rm -rf "$BATCH_DIR"
+
+TOTAL=$((${SUCCESS} + ${FAILED}))
+if [ $FAILED -eq 0 ]; then
+    echo "BATCH_OK: count=$TOTAL"
+else
+    echo "BATCH_PARTIAL: success=$SUCCESS failed=$FAILED total=$TOTAL"
+fi
+exit 0

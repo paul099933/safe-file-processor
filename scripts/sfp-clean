@@ -1,0 +1,54 @@
+#!/bin/bash
+
+# ============================================
+# sfp-clean: 安全清理热区隔离目录
+# 白名单防护 + 输出标准化
+# 输出标准化: CLEAN_OK / CLEAN_REJECT
+# ============================================
+
+TARGET="${1:-}"
+[ -z "$TARGET" ] && { echo 'CLEAN_REJECT: reason="缺少目标路径" usage="sfp-clean <target_dir>"'; exit 1; }
+
+# 解析真实路径
+TARGET="$(cd "$(dirname "$TARGET" 2>/dev/null || echo .)" 2>/dev/null && pwd -P 2>/dev/null)/$(basename "$TARGET" 2>/dev/null)" 2>/dev/null || TARGET="$1"
+
+HOT_ZONE="${SFP_HOT_ZONE:-$HOME/.sfp/hot}"
+REAL_HOT=$(cd "$HOT_ZONE" 2>/dev/null && pwd -P 2>/dev/null || echo "$HOT_ZONE")
+REAL_TARGET=$(cd "$(dirname "$TARGET" 2>/dev/null || echo .)" 2>/dev/null && pwd -P 2>/dev/null || echo "")
+REAL_TARGET="${REAL_TARGET}/$(basename "$TARGET")"
+
+# 白名单 1：禁止根目录和 $HOME
+for p in "/" "$HOME"; do
+    [ "$TARGET" = "$p" ] && { echo "CLEAN_REJECT: reason=\"禁止删除根目录或HOME\" target=\"$TARGET\""; exit 1; }
+done
+
+# 白名单 2：必须位于热区内
+if [[ ! "$REAL_TARGET" =~ ^"$REAL_HOT" ]]; then
+    echo "CLEAN_REJECT: reason=\"目标不在热区内\" target=\"$TARGET\" hot_zone=\"$HOT_ZONE\""
+    exit 1
+fi
+
+# 白名单 3：禁止包含 ..
+if echo "$TARGET" | grep -q '\.\.'; then
+    echo "CLEAN_REJECT: reason=\"路径包含非法字符..\" target=\"$TARGET\""
+    exit 1
+fi
+
+# 白名单 4：必须匹配隔离目录命名模式（时间戳-PID）
+BASENAME=$(basename "$TARGET")
+if ! echo "$BASENAME" | grep -qE '^(batch_)?[0-9]{8}-[0-9]{6}-[0-9]+$'; then
+    echo "CLEAN_REJECT: reason=\"非隔离目录命名模式\" target=\"$TARGET\" pattern=\"YYYYMMDD-HHMMSS-PID\""
+    exit 1
+fi
+
+# 执行清理
+if [ ! -d "$TARGET" ]; then
+    echo "CLEAN_REJECT: reason=\"目标不是目录\" target=\"$TARGET\""
+    exit 1
+fi
+
+REMOVED=$(find "$TARGET" -type f | wc -l)
+rm -rf "$TARGET"
+
+echo "CLEAN_OK: target=\"$TARGET\" removed=$REMOVED"
+exit 0

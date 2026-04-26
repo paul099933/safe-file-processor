@@ -1,0 +1,70 @@
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INPUT="${1:-}"; OUTPUT="${2:-}"
+[ -z "$INPUT" ] && { echo 'CONVERT_FAIL: reason="缺少输入文件"'; exit 1; }
+[ -z "$OUTPUT" ] && { echo 'CONVERT_FAIL: reason="缺少输出文件"'; exit 1; }
+[ ! -e "$INPUT" ] && { echo "CONVERT_FAIL: reason=\"文件不存在\""; exit 1; }
+
+IN_FMT="${INPUT##*.}"; OUT_FMT="${OUTPUT##*.}"
+IN_FMT="$(echo "$IN_FMT" | tr '[:upper:]' '[:lower:]')"
+OUT_FMT="$(echo "$OUT_FMT" | tr '[:upper:]' '[:lower:]')"
+
+TOOL=""; case "${IN_FMT}:${OUT_FMT}" in
+    jpg:png|jpg:webp|png:jpg|png:webp|webp:png|gif:jpg|bmp:jpg|txt:md|md:txt) TOOL="convert" ;;
+    md:pdf|txt:pdf|html:pdf) TOOL="pandoc" ;;
+    pdf:txt) TOOL="pdftotext" ;;
+    mp4:mp3|mov:mp4|avi:mp4) TOOL="ffmpeg" ;;
+    zip:dir|tar:dir) TOOL="extract" ;;
+    *) echo "ROUTE_FAIL: input_fmt=\"$IN_FMT\" output_fmt=\"$OUT_FMT\""; exit 2 ;;
+esac
+
+MIGRATE_OUT=$("${SCRIPT_DIR}/sfp-in" "$INPUT" 2>&1)
+[ $? -ne 0 ] && { echo "$MIGRATE_OUT"; exit 1; }
+
+DIR=$(echo "$MIGRATE_OUT" | awk -F'dest="' '{print $2}' | awk -F'"' '{print $1}')
+DIR=$(dirname "$DIR"); cd "$DIR" || exit 1
+
+BASENAME=$(basename "$INPUT")
+SAFE_NAME=$(echo "$BASENAME" | tr '$"`\' '_' | tr -s '_')
+SRC="${DIR}/${SAFE_NAME}"
+DEST_BASENAME=$(basename "$OUTPUT")
+SAFE_DEST=$(echo "$DEST_BASENAME" | tr '$"`\' '_' | tr -s '_')
+DEST="${DIR}/${SAFE_DEST}"
+
+if [ "$TOOL" = "pdftotext" ]; then
+    CHAR_COUNT=$(pdftotext -l 1 "$SRC" - 2>/dev/null | tr -d '[:space:]' | wc -c)
+    [ "$CHAR_COUNT" -eq 0 ] && TOOL="ocr-pdf"
+fi
+
+case "$TOOL" in
+    convert) "${SCRIPT_DIR}/sfp-process" convert "$SRC" "$DEST" || exit 1 ;;
+    pandoc) "${SCRIPT_DIR}/sfp-process" pandoc "$SRC" -o "$DEST" || exit 1 ;;
+    pdftotext)
+        "${SCRIPT_DIR}/sfp-process" pdftotext "$SRC" "$DEST" || exit 1
+        [ ! -s "$DEST" ] && { echo "CONVERT_FAIL: reason=\"pdftotext输出为空\""; exit 1; } ;;
+    ffmpeg) "${SCRIPT_DIR}/sfp-process" ffmpeg -i "$SRC" "$DEST" -y || exit 1 ;;
+    extract)
+        mkdir -p "$DEST"
+        unzip -o "$SRC" -d "$DEST" 2>/dev/null || tar xf "$SRC" -C "$DEST" ;;
+    ocr-pdf)
+        if ! command -v pdftoppm >/dev/null 2>&1; then
+            echo "CONVERT_FAIL: reason=\"工具未安装\" need=\"pdftoppm\""; exit 1; fi
+        if ! command -v tesseract >/dev/null 2>&1; then
+            echo "CONVERT_FAIL: reason=\"工具未安装\" need=\"tesseract\""; exit 1; fi
+        if ! tesseract --list-langs 2>/dev/null | grep -q "chi_sim"; then
+            echo "CONVERT_FAIL: reason=\"OCR语言包缺失\" need=\"chi_sim\""; exit 1; fi
+        pdftoppm -png "$SRC" page >/dev/null 2>&1
+        for p in page-*.png; do
+            [ -f "$p" ] && tesseract "$p" "${p%.png}" -l chi_sim 2>"${p%.png}.err"
+        done
+        cat page-*.txt > "$DEST" 2>/dev/null
+        rm -f page-*.png page-*.txt page-*.err
+        [ ! -s "$DEST" ] && { echo "CONVERT_FAIL: reason=\"OCR输出为空\""; exit 1; } ;;
+esac
+
+OUT_RESULT=$("${SCRIPT_DIR}/sfp-out" "$DEST" 2>&1)
+[ $? -ne 0 ] && { echo "$OUT_RESULT"; exit 1; }
+DEST_PATH=$(echo "$OUT_RESULT" | tail -1)
+echo "CONVERT_OK: output=\"$DEST_PATH\" tool=$TOOL"
+"${SCRIPT_DIR}/sfp-clean" "$DIR" >/dev/null 2>&1 || true
+exit 0

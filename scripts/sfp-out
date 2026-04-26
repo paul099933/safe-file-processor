@@ -1,0 +1,68 @@
+#!/bin/bash
+
+# ============================================
+# sfp-out: 交付结果到桌面/WSL出口
+# 质量门控 + 桌面探测 + NTFS修权
+# 输出标准化: DELIVER_OK / DELIVER_REJECT / DELIVER_FAIL
+# ============================================
+
+SOURCE="${1:-}"
+TARGET_NAME="${2:-}"
+
+[ -z "$SOURCE" ] && { echo 'DELIVER_FAIL: reason="缺少源文件参数" usage="sfp-out <source> [target_name]"'; exit 1; }
+[ ! -e "$SOURCE" ] && { echo "DELIVER_FAIL: reason=\"源文件不存在\" path=\"$SOURCE\""; exit 1; }
+
+FILENAME=$(basename "$SOURCE")
+
+# 质量门控
+SIZE=$(stat -c%s "$SOURCE" 2>/dev/null || stat -f%z "$SOURCE" 2>/dev/null || echo "0")
+[ "$SIZE" -eq 0 ] && { echo "DELIVER_REJECT: reason=\"文件大小为0\" file=\"$FILENAME\""; exit 1; }
+
+# 桌面探测（WSL2）
+OUTBOX="${SFP_OUTBOX:-$HOME/.sfp/outbox}"
+MODE="wsl"
+
+if grep -qi microsoft /proc/version 2>/dev/null && command -v powershell.exe >/dev/null 2>&1; then
+    DESKTOP_WIN=$(powershell.exe -NoProfile -Command "[Environment]::GetFolderPath('Desktop')" 2>/dev/null | tr -d '\r\n')
+    if [ -n "$DESKTOP_WIN" ] && command -v wslpath >/dev/null 2>&1; then
+        DESKTOP_WSL=$(wslpath -u "$DESKTOP_WIN" 2>/dev/null)
+        if [ -n "$DESKTOP_WSL" ]; then
+            OUTBOX="${DESKTOP_WSL}/Hermes_Outbox"
+            mkdir -p "$OUTBOX" 2>/dev/null && MODE="desktop"
+        fi
+    fi
+fi
+
+# 回退到 WSL 出口
+if [ "$MODE" = "wsl" ]; then
+    mkdir -p "$OUTBOX"
+fi
+
+# 目标路径
+if [ -n "$TARGET_NAME" ]; then
+    DEST="${OUTBOX}/${TARGET_NAME}"
+    mkdir -p "$(dirname "$DEST")" 2>/dev/null || true
+else
+    DEST="${OUTBOX}/${FILENAME}"
+fi
+
+# 检查已存在
+[ -e "$DEST" ] && { echo "DELIVER_OK: dest=\"$DEST\" mode=${MODE} note=\"已存在\""; echo "$DEST"; exit 0; }
+
+# 复制
+if ! cp "$SOURCE" "$DEST"; then
+    echo "DELIVER_FAIL: reason=\"复制失败\" source=\"$SOURCE\" dest=\"$DEST\""
+    exit 1
+fi
+
+# NTFS 修权（桌面模式）
+if [ "$MODE" = "desktop" ]; then
+    WIN_DEST=$(wslpath -w "$DEST" 2>/dev/null || echo "")
+    [ -n "$WIN_DEST" ] && cmd.exe /c "attrib -R \"$WIN_DEST\"" >/dev/null 2>&1 || true
+else
+    chmod 644 "$DEST" 2>/dev/null || true
+fi
+
+echo "DELIVER_OK: dest=\"$DEST\" mode=${MODE}"
+echo "$DEST"
+exit 0

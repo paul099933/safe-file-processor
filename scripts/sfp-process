@@ -1,0 +1,72 @@
+#!/bin/bash
+
+# ============================================
+# sfp-process: 在热区内执行命令
+# 9P 红线 + 工具箱检查
+# 输出标准化: PROCESS_OK / PROCESS_FAIL
+# ============================================
+
+# 加载工具箱
+TOOLBOX="${XDG_CONFIG_HOME:-$HOME/.config}/sfp/toolbox"
+[ -f "$TOOLBOX" ] && source "$TOOLBOX"
+
+# 9P 红线检查
+check_hot_zone() {
+    local cwd=$(pwd)
+    local real_cwd=$(cd "$cwd" && pwd -P 2>/dev/null || echo "$cwd")
+    local hot="${SFP_HOT_ZONE:-$HOME/.sfp/hot}"
+    local real_hot=$(cd "$hot" 2>/dev/null && pwd -P 2>/dev/null || echo "$hot")
+
+    if [[ ! "$real_cwd" =~ ^"$real_hot" ]]; then
+        echo "PROCESS_FAIL: reason=\"9P红线违反\" cwd=\"$cwd\" hot_zone=\"$hot\""
+        exit 1
+    fi
+}
+
+check_hot_zone
+
+# 参数检查
+[ $# -lt 1 ] && { echo 'PROCESS_FAIL: reason="缺少命令参数" usage="sfp-process <command> [args...]"'; exit 1; }
+
+CMD="$1"
+shift
+
+# 工具可用性检查
+check_tool() {
+    local tool="$1" var="${2:-}" hint="${3:-}"
+    if [ -n "$var" ]; then
+        local val="${!var:-0}"
+        [ "$val" != "1" ] && {
+            echo "PROCESS_FAIL: reason=\"工具未在工具箱标记\" need=\"$tool\" install_hint=\"$hint\""
+            exit 1
+        }
+    fi
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "PROCESS_FAIL: reason=\"工具未安装\" need=\"$tool\" install_hint=\"$hint\""
+        exit 1
+    fi
+}
+
+case "$CMD" in
+    convert|magick) check_tool "convert" "HAS_IMAGEMAGICK" "sudo apt install imagemagick" ;;
+    ffmpeg)         check_tool "ffmpeg" "HAS_FFMPEG" "sudo apt install ffmpeg" ;;
+    pandoc)         check_tool "pandoc" "HAS_PANDOC" "sudo apt install pandoc" ;;
+    pdftotext)      check_tool "pdftotext" "HAS_PDFTOTEXT" "sudo apt install poppler-utils" ;;
+    tesseract)      check_tool "tesseract" "HAS_TESSERACT" "sudo apt install tesseract-ocr" ;;
+    tar|gzip|gunzip|cat|cp|mv|rm|ls) ;;  # 系统自带
+    *)
+        if ! command -v "$CMD" >/dev/null 2>&1; then
+            echo "PROCESS_FAIL: reason=\"未知命令\" need=\"$CMD\""
+            exit 1
+        fi
+        ;;
+esac
+
+# 执行
+if "$CMD" "$@"; then
+    echo "PROCESS_OK: command=\"$CMD\" args=\"$*\""
+    exit 0
+else
+    echo "PROCESS_FAIL: reason=\"命令执行失败\" command=\"$CMD\" args=\"$*\" exit_code=$?"
+    exit 1
+fi

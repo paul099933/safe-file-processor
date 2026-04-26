@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# ============================================
+# sfp-in: 迁移文件到热区隔离目录
+# 输出标准化: MIGRATE_OK / MIGRATE_FAIL
+# ============================================
+
+SOURCE="${1:-}"
+if [ -z "$SOURCE" ]; then
+    echo 'MIGRATE_FAIL: reason="缺少源文件参数" usage="sfp-in <source_file>"'
+    exit 1
+fi
+
+# 解析真实路径（处理 ~ 和相对路径）
+SOURCE="$(cd "$(dirname "$SOURCE" 2>/dev/null || echo .)" 2>/dev/null && pwd -P 2>/dev/null || echo "$SOURCE")/$(basename "$SOURCE" 2>/dev/null || echo "$SOURCE")"
+[ ! -e "$SOURCE" ] && SOURCE="$1"  # 回退
+
+if [ ! -e "$SOURCE" ]; then
+    echo "MIGRATE_FAIL: reason=\"文件不存在\" path=\"$1\""
+    exit 1
+fi
+
+HOT_ZONE="${SFP_HOT_ZONE:-$HOME/.sfp/hot}"
+mkdir -p "$HOT_ZONE"
+
+# 创建隔离目录
+ISOLATION_DIR="${HOT_ZONE}/$(date +%Y%m%d-%H%M%S)-$$"
+mkdir -p "$ISOLATION_DIR"
+
+# 安全文件名（转义危险字符）
+BASENAME=$(basename "$SOURCE")
+SAFE_NAME=$(echo "$BASENAME" | tr '$!" ' '_' | tr -s '_')
+[ -z "$SAFE_NAME" ] && SAFE_NAME="file"
+
+DEST="${ISOLATION_DIR}/${SAFE_NAME}"
+
+# 复制
+if [ -d "$SOURCE" ]; then
+    cp -r "$SOURCE" "$DEST"
+else
+    cp "$SOURCE" "$DEST"
+fi
+
+# 修权
+chmod -R 644 "$DEST" 2>/dev/null || true
+find "$DEST" -type d -exec chmod 755 {} \; 2>/dev/null || true
+
+# 获取大小
+SIZE=$(stat -c%s "$DEST" 2>/dev/null || stat -f%z "$DEST" 2>/dev/null || echo "0")
+
+echo "MIGRATE_OK: dest=\"$DEST\" size=$SIZE"
+exit 0
